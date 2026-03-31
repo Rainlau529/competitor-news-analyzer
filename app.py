@@ -574,36 +574,38 @@ def analyze():
                 return
 
             yield sse_data({'type': 'progress', 'step': 2, 'message': '正在转换日期格式...', 'percent': 20})
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
 
-            brands = df["Media ID"].dropna().unique().tolist()
+            # 转换日期列并删除无效日期行（减少后续处理的数据量）
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+            df = df.dropna(subset=["Date", "Media ID", "Source"])
+
+            brands = df["Media ID"].unique().tolist()
             total_brands = len(brands)
 
             yield sse_data({'type': 'progress', 'step': 3, 'message': '发现 ' + str(total_brands) + ' 个品牌，开始分析...', 'percent': 30})
 
-            # 预计算最新触达数
+            # 预计算最新触达数（优化：避免重复copy）
             latest_audience_cache = {}
             for i, brand in enumerate(brands):
-                brand_df = df[df["Media ID"] == brand].copy()
+                brand_df = df[df["Media ID"] == brand]
                 current_percent = 30 + int((i+1) / total_brands * 40)
                 yield sse_data({'type': 'progress', 'step': 3, 'message': '正在分析品牌 ' + str(i+1) + '/' + str(total_brands) + '：' + brand + '...', 'percent': current_percent})
 
                 for source in brand_df["Source"].unique():
-                    media_data = brand_df[brand_df["Source"] == source].copy()
-                    media_data = media_data.dropna(subset=["Date"])
+                    # 只筛选需要的列，减少内存使用
+                    media_data = brand_df[brand_df["Source"] == source][["Date", "Potential Audience"]]
                     if media_data.empty:
                         latest_audience_cache[(brand, source)] = None
                     else:
                         latest_idx = media_data["Date"].idxmax()
-                        latest_row = media_data.loc[latest_idx]
-                        latest_audience_cache[(brand, source)] = latest_row["Potential Audience"]
+                        latest_audience_cache[(brand, source)] = media_data.loc[latest_idx, "Potential Audience"]
 
             yield sse_data({'type': 'progress', 'step': 4, 'message': '正在生成TOP10排名...', 'percent': 75})
 
             # 生成结果
             all_results = []
             for brand in brands:
-                brand_df = df[df["Media ID"] == brand].copy()
+                brand_df = df[df["Media ID"] == brand]
                 volume_df = brand_df.groupby("Source").size().reset_index(name="声量（篇）")
 
                 def get_latest_audience(media_name):
