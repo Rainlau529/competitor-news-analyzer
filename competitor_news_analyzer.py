@@ -172,6 +172,22 @@ def analyze_competitor_news(input_path):
     brands = df["Media ID"].dropna().unique().tolist()
     print(f"发现品牌: {brands}")
 
+    # 预计算每个(品牌, 媒体)的最新触达数（避免循环中重复计算）
+    latest_audience_cache = {}
+    for brand in brands:
+        brand_df = df[df["Media ID"] == brand].copy()
+        for source in brand_df["Source"].unique():
+            media_data = brand_df[brand_df["Source"] == source].copy()
+            # 删除日期为空的行
+            media_data = media_data.dropna(subset=["Date"])
+            if media_data.empty:
+                latest_audience_cache[(brand, source)] = None
+            else:
+                # 获取日期最大的那一行
+                latest_idx = media_data["Date"].idxmax()
+                latest_row = media_data.loc[latest_idx]
+                latest_audience_cache[(brand, source)] = latest_row["Potential Audience"]
+
     # 存储所有结果
     all_results = []
 
@@ -182,13 +198,9 @@ def analyze_competitor_news(input_path):
         # 统计每个媒体的声量（篇数）
         volume_df = brand_df.groupby("Source").size().reset_index(name="声量（篇）")
 
-        # 获取每个媒体最新日期的触达数
+        # 获取每个媒体最新日期的触达数（从缓存中取）
         def get_latest_audience(media_name):
-            media_data = brand_df[brand_df["Source"] == media_name]
-            latest_row = media_data.loc[media_data["Date"].idxmax()] if not media_data.empty else None
-            if latest_row is not None:
-                return latest_row["Potential Audience"]
-            return None
+            return latest_audience_cache.get((brand, media_name), None)
 
         volume_df["触达（人次）"] = volume_df["Source"].apply(get_latest_audience)
 
