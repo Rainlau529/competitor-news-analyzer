@@ -558,41 +558,35 @@ def analyze():
 
         # 使用SSE流式处理
         def generate():
-            # 进度回调
-            def send_progress(step, message, percent):
-                import json
-                data = json.dumps({
-                    'type': 'progress',
-                    'step': step,
-                    'message': message,
-                    'percent': percent
-                })
-                yield f'data: {data}\\n\\n'
+            import json
 
-            send_progress(1, '正在检查数据格式...', 10)
-            yield f'data: {"type":"progress","step":1,"message":"正在检查数据格式...","percent":10}\\n\\n'
+            def sse_data(data):
+                """将字典转为SSE格式的字符串"""
+                return 'data: ' + json.dumps(data) + '\n\n'
+
+            yield sse_data({'type': 'progress', 'step': 1, 'message': '正在检查数据格式...', 'percent': 10})
 
             # 检查必要的列
             required_columns = ["Media ID", "Date", "Source", "Potential Audience"]
             missing_columns = [col for col in required_columns if col not in df.columns]
             if missing_columns:
-                yield f'data: {"type":"error","message":"缺少必要的列: {", ".join(missing_columns)}"}\\n\\n'
+                yield sse_data({'type': 'error', 'message': '缺少必要的列: ' + ', '.join(missing_columns)})
                 return
 
-            yield f'data: {"type":"progress","step":2,"message":"正在转换日期格式...","percent":20}\\n\\n'
+            yield sse_data({'type': 'progress', 'step': 2, 'message': '正在转换日期格式...', 'percent': 20})
             df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
 
             brands = df["Media ID"].dropna().unique().tolist()
             total_brands = len(brands)
 
-            yield f'data: {"type":"progress","step":3,"message":"发现 {total_brands} 个品牌，开始分析...","percent":30}\\n\\n'
+            yield sse_data({'type': 'progress', 'step': 3, 'message': '发现 ' + str(total_brands) + ' 个品牌，开始分析...', 'percent': 30})
 
             # 预计算最新触达数
             latest_audience_cache = {}
             for i, brand in enumerate(brands):
                 brand_df = df[df["Media ID"] == brand].copy()
-                send_progress(3, f'正在分析品牌 {i+1}/{total_brands}：{brand}...', 30 + int((i+1) / total_brands * 40))
-                yield f'data: {"type":"progress","step":3,"message":"正在分析品牌 {i+1}/{total_brands}：{brand}...","percent":{30 + int((i+1) / total_brands * 40)}}\\n\\n'
+                current_percent = 30 + int((i+1) / total_brands * 40)
+                yield sse_data({'type': 'progress', 'step': 3, 'message': '正在分析品牌 ' + str(i+1) + '/' + str(total_brands) + '：' + brand + '...', 'percent': current_percent})
 
                 for source in brand_df["Source"].unique():
                     media_data = brand_df[brand_df["Source"] == source].copy()
@@ -604,7 +598,7 @@ def analyze():
                         latest_row = media_data.loc[latest_idx]
                         latest_audience_cache[(brand, source)] = latest_row["Potential Audience"]
 
-            yield f'data: {"type":"progress","step":4,"message":"正在生成TOP10排名...","percent":75}\\n\\n'
+            yield sse_data({'type': 'progress', 'step': 4, 'message': '正在生成TOP10排名...', 'percent': 75})
 
             # 生成结果
             all_results = []
@@ -625,23 +619,23 @@ def analyze():
                 volume_df = volume_df[["序号", "品牌名称", "媒体名称", "声量（篇）", "触达（人次）", "媒体类别"]]
                 all_results.append(volume_df)
 
-            yield f'data: {"type":"progress","step":5,"message":"正在生成结果...","percent":90}\\n\\n'
+            yield sse_data({'type': 'progress', 'step': 5, 'message': '正在生成结果...', 'percent': 90})
 
             # 生成HTML
             brands_count = len(all_results)
             total_media = sum(len(r) for r in all_results)
 
-            result_html = f'''
+            result_html = '''
                 <div class="result-info">
-                    ✅ 分析完成！共处理 <strong>{brands_count}</strong> 个品牌，生成 <strong>{total_media}</strong> 条记录
+                    ✅ 分析完成！共处理 <strong>''' + str(brands_count) + '''</strong> 个品牌，生成 <strong>''' + str(total_media) + '''</strong> 条记录
                 </div>
             '''
 
             for brand_df in all_results:
-                brand_name = brand_df[0]['品牌名称']
-                result_html += f'''
+                brand_name = brand_df.iloc[0]['品牌名称']
+                result_html += '''
                     <div class="brand-section">
-                        <div class="brand-title">{brand_name} TOP10</div>
+                        <div class="brand-title">''' + brand_name + ''' TOP10</div>
                         <table>
                             <thead>
                                 <tr>
@@ -656,13 +650,13 @@ def analyze():
                 '''
                 for _, row in brand_df.iterrows():
                     category_class = '汽车' if '汽车' in row['媒体类别'] else ('商业' if '商业' in row['媒体类别'] else ('生活' if '生活' in row['媒体类别'] else '综合'))
-                    result_html += f'''
+                    result_html += '''
                                 <tr>
-                                    <td>{row['序号']}</td>
-                                    <td>{row['媒体名称']}</td>
-                                    <td>{row['声量（篇）']}</td>
-                                    <td>{row['触达（人次）']}</td>
-                                    <td><span class="category-tag category-{category_class}">{row['媒体类别']}</span></td>
+                                    <td>''' + str(row['序号']) + '''</td>
+                                    <td>''' + str(row['媒体名称']) + '''</td>
+                                    <td>''' + str(row['声量（篇）']) + '''</td>
+                                    <td>''' + str(row['触达（人次）']) + '''</td>
+                                    <td><span class="category-tag category-''' + category_class + '''">''' + str(row['媒体类别']) + '''</span></td>
                                 </tr>
                     '''
                 result_html += '''
@@ -671,9 +665,7 @@ def analyze():
                     </div>
                 '''
 
-            import json
-            done_data = json.dumps({"type": "done", "content": result_html})
-            yield 'data: ' + done_data + '\n\n'
+            yield sse_data({'type': 'done', 'content': result_html})
 
         return Response(generate(), mimetype='text/event-stream')
 
