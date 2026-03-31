@@ -454,7 +454,7 @@ HTML_TEMPLATE = '''
             }
         });
 
-        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+        document.getElementById('uploadForm').addEventListener('submit', (e) => {
             e.preventDefault();
 
             if (!fileInput.files.length) {
@@ -467,55 +467,56 @@ HTML_TEMPLATE = '''
 
             // 显示进度条
             submitBtn.disabled = true;
-            submitBtn.textContent = '处理中...';
+            submitBtn.textContent = '处理中，请稍候...';
             progressContainer.classList.add('active');
+            progressBar.style.width = '50%';
+            progressPercent.textContent = '50%';
+            progressStatus.textContent = '正在分析数据...';
             resultArea.innerHTML = '';
 
-            try {
-                const response = await fetch('/analyze', {
-                    method: 'POST',
-                    body: formData
-                });
+            // 使用 iframe 方式提交，避免页面跳转
+            const iframe = document.createElement('iframe');
+            iframe.style.display = 'none';
+            iframe.name = 'uploadFrame';
+            document.body.appendChild(iframe);
 
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let resultHTML = '';
+            // 监听 iframe 加载完成
+            iframe.onload = () => {
+                try {
+                    const doc = iframe.contentDocument || iframe.contentWindow.document;
+                    const body = doc.body.innerHTML;
+                    if (body.includes('error') || body.includes('result-info')) {
+                        resultArea.innerHTML = body;
+                        progressBar.style.width = '100%';
+                        progressPercent.textContent = '100%';
+                        progressStatus.textContent = '处理完成！';
+                    }
+                } catch (err) {
+                    resultArea.innerHTML = '<div class="error">处理失败，请稍后重试</div>';
+                }
+                submitBtn.disabled = false;
+                submitBtn.textContent = '开始分析';
+                setTimeout(() => {
+                    progressContainer.classList.remove('active');
+                    document.body.removeChild(iframe);
+                }, 2000);
+            };
 
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-
-                    const chunk = decoder.decode(value);
-                    const lines = chunk.split('\\n');
-
-                    for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            const data = JSON.parse(line.slice(6));
-
-                            if (data.type === 'progress') {
-                                progressStatus.textContent = data.message;
-                                progressBar.style.width = data.percent + '%';
-                                progressPercent.textContent = data.percent + '%';
-                            } else if (data.type === 'html') {
-                                resultHTML += data.content;
-                            } else if (data.type === 'error') {
-                                resultArea.innerHTML = '<div class="error">' + data.message + '</div>';
-                            } else if (data.type === 'done') {
-                                resultHTML = data.content;
-                            }
-                        }
+            // 监听超时
+            setTimeout(() => {
+                if (submitBtn.disabled) {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = '开始分析';
+                    progressContainer.classList.remove('active');
+                    resultArea.innerHTML = '<div class="error">处理超时，请稍后重试</div>';
+                    if (document.body.contains(iframe)) {
+                        document.body.removeChild(iframe);
                     }
                 }
+            }, 120000); // 2分钟超时
 
-                resultArea.innerHTML = resultHTML;
-
-            } catch (error) {
-                resultArea.innerHTML = '<div class="error">处理失败: ' + error.message + '</div>';
-            }
-
-            submitBtn.disabled = false;
-            submitBtn.textContent = '开始分析';
-            progressContainer.classList.remove('active');
+            document.getElementById('uploadForm').target = 'uploadFrame';
+            document.getElementById('uploadForm').submit();
         });
     </script>
 </body>
@@ -531,153 +532,134 @@ def index():
 @app.route('/analyze', methods=['POST'])
 def analyze():
     if 'file' not in request.files:
-        return Response(
-            'data: {"type":"error","message":"请选择文件"}\\n\\n',
-            mimetype='text/event-stream'
-        )
+        return '''
+            <div class="error">请选择文件</div>
+            <script>setTimeout(() => { window.location.href = '/'; }, 2000)</script>
+        '''
 
     file = request.files['file']
     if file.filename == '':
-        return Response(
-            'data: {"type":"error","message":"请选择文件"}\\n\\n',
-            mimetype='text/event-stream'
-        )
+        return '''
+            <div class="error">请选择文件</div>
+            <script>setTimeout(() => { window.location.href = '/'; }, 2000)</script>
+        '''
 
     if not file.filename.endswith('.xlsx'):
-        return Response(
-            'data: {"type":"error","message":"只支持 .xlsx 格式文件"}\\n\\n',
-            mimetype='text/event-stream'
-        )
-
-    def progress_callback(step, message, percent):
-        pass  # SSE推送在下面处理
+        return '''
+            <div class="error">只支持 .xlsx 格式文件</div>
+            <script>setTimeout(() => { window.location.href = '/'; }, 2000)</script>
+        '''
 
     try:
         # 读取文件
         df = pd.read_excel(file)
 
-        # 使用SSE流式处理
-        def generate():
-            import json
+        # 检查必要的列
+        required_columns = ["Media ID", "Date", "Source", "Potential Audience"]
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            return '''
+                <div class="error">缺少必要的列: ''' + ', '.join(missing_columns) + '''</div>
+                <script>setTimeout(() => { window.location.href = '/'; }, 3000)</script>
+            '''
 
-            def sse_data(data):
-                """将字典转为SSE格式的字符串"""
-                return 'data: ' + json.dumps(data) + '\n\n'
+        # 转换日期列并删除无效日期行
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.dropna(subset=["Date", "Media ID", "Source"])
 
-            yield sse_data({'type': 'progress', 'step': 1, 'message': '正在检查数据格式...', 'percent': 10})
+        brands = df["Media ID"].unique().tolist()
+        total_brands = len(brands)
 
-            # 检查必要的列
-            required_columns = ["Media ID", "Date", "Source", "Potential Audience"]
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            if missing_columns:
-                yield sse_data({'type': 'error', 'message': '缺少必要的列: ' + ', '.join(missing_columns)})
-                return
+        # 预计算最新触达数
+        latest_audience_cache = {}
+        for brand in brands:
+            brand_df = df[df["Media ID"] == brand]
+            for source in brand_df["Source"].unique():
+                media_data = brand_df[brand_df["Source"] == source][["Date", "Potential Audience"]]
+                if media_data.empty:
+                    latest_audience_cache[(brand, source)] = None
+                else:
+                    latest_idx = media_data["Date"].idxmax()
+                    latest_audience_cache[(brand, source)] = media_data.loc[latest_idx, "Potential Audience"]
 
-            yield sse_data({'type': 'progress', 'step': 2, 'message': '正在转换日期格式...', 'percent': 20})
+        # 生成结果
+        all_results = []
+        for brand in brands:
+            brand_df = df[df["Media ID"] == brand]
+            volume_df = brand_df.groupby("Source").size().reset_index(name="声量（篇）")
 
-            # 转换日期列并删除无效日期行（减少后续处理的数据量）
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-            df = df.dropna(subset=["Date", "Media ID", "Source"])
+            def get_latest_audience(media_name):
+                return latest_audience_cache.get((brand, media_name), None)
 
-            brands = df["Media ID"].unique().tolist()
-            total_brands = len(brands)
+            volume_df["触达（人次）"] = volume_df["Source"].apply(get_latest_audience)
+            volume_df = volume_df.sort_values("声量（篇）", ascending=False).head(10)
+            volume_df["品牌名称"] = brand
+            volume_df["媒体类别"] = volume_df["Source"].apply(get_media_category)
+            volume_df["触达（人次）"] = volume_df["触达（人次）"].apply(format_audience)
+            volume_df.insert(0, "序号", range(1, len(volume_df) + 1))
+            volume_df = volume_df.rename(columns={"Source": "媒体名称"})
+            volume_df = volume_df[["序号", "品牌名称", "媒体名称", "声量（篇）", "触达（人次）", "媒体类别"]]
+            all_results.append(volume_df)
 
-            yield sse_data({'type': 'progress', 'step': 3, 'message': '发现 ' + str(total_brands) + ' 个品牌，开始分析...', 'percent': 30})
+        # 生成HTML
+        brands_count = len(all_results)
+        total_media = sum(len(r) for r in all_results)
 
-            # 预计算最新触达数（优化：避免重复copy）
-            latest_audience_cache = {}
-            for i, brand in enumerate(brands):
-                brand_df = df[df["Media ID"] == brand]
-                current_percent = 30 + int((i+1) / total_brands * 40)
-                yield sse_data({'type': 'progress', 'step': 3, 'message': '正在分析品牌 ' + str(i+1) + '/' + str(total_brands) + '：' + brand + '...', 'percent': current_percent})
+        result_html = '''
+            <div class="result-info">
+                ✅ 分析完成！共处理 <strong>''' + str(brands_count) + '''</strong> 个品牌，生成 <strong>''' + str(total_media) + '''</strong> 条记录
+            </div>
+        '''
 
-                for source in brand_df["Source"].unique():
-                    # 只筛选需要的列，减少内存使用
-                    media_data = brand_df[brand_df["Source"] == source][["Date", "Potential Audience"]]
-                    if media_data.empty:
-                        latest_audience_cache[(brand, source)] = None
-                    else:
-                        latest_idx = media_data["Date"].idxmax()
-                        latest_audience_cache[(brand, source)] = media_data.loc[latest_idx, "Potential Audience"]
-
-            yield sse_data({'type': 'progress', 'step': 4, 'message': '正在生成TOP10排名...', 'percent': 75})
-
-            # 生成结果
-            all_results = []
-            for brand in brands:
-                brand_df = df[df["Media ID"] == brand]
-                volume_df = brand_df.groupby("Source").size().reset_index(name="声量（篇）")
-
-                def get_latest_audience(media_name):
-                    return latest_audience_cache.get((brand, media_name), None)
-
-                volume_df["触达（人次）"] = volume_df["Source"].apply(get_latest_audience)
-                volume_df = volume_df.sort_values("声量（篇）", ascending=False).head(10)
-                volume_df["品牌名称"] = brand
-                volume_df["媒体类别"] = volume_df["Source"].apply(get_media_category)
-                volume_df["触达（人次）"] = volume_df["触达（人次）"].apply(format_audience)
-                volume_df.insert(0, "序号", range(1, len(volume_df) + 1))
-                volume_df = volume_df.rename(columns={"Source": "媒体名称"})
-                volume_df = volume_df[["序号", "品牌名称", "媒体名称", "声量（篇）", "触达（人次）", "媒体类别"]]
-                all_results.append(volume_df)
-
-            yield sse_data({'type': 'progress', 'step': 5, 'message': '正在生成结果...', 'percent': 90})
-
-            # 生成HTML
-            brands_count = len(all_results)
-            total_media = sum(len(r) for r in all_results)
-
-            result_html = '''
-                <div class="result-info">
-                    ✅ 分析完成！共处理 <strong>''' + str(brands_count) + '''</strong> 个品牌，生成 <strong>''' + str(total_media) + '''</strong> 条记录
+        for brand_df in all_results:
+            brand_name = brand_df.iloc[0]['品牌名称']
+            result_html += '''
+                <div class="brand-section">
+                    <div class="brand-title">''' + brand_name + ''' TOP10</div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>序号</th>
+                                <th>媒体名称</th>
+                                <th>声量（篇）</th>
+                                <th>触达（人次）</th>
+                                <th>媒体类别</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+            '''
+            for _, row in brand_df.iterrows():
+                category_class = '汽车' if '汽车' in row['媒体类别'] else ('商业' if '商业' in row['媒体类别'] else ('生活' if '生活' in row['媒体类别'] else '综合'))
+                result_html += '''
+                            <tr>
+                                <td>''' + str(row['序号']) + '''</td>
+                                <td>''' + str(row['媒体名称']) + '''</td>
+                                <td>''' + str(row['声量（篇）']) + '''</td>
+                                <td>''' + str(row['触达（人次）']) + '''</td>
+                                <td><span class="category-tag category-''' + category_class + '''">''' + str(row['媒体类别']) + '''</span></td>
+                            </tr>
+                '''
+            result_html += '''
+                        </tbody>
+                    </table>
                 </div>
             '''
 
-            for brand_df in all_results:
-                brand_name = brand_df.iloc[0]['品牌名称']
-                result_html += '''
-                    <div class="brand-section">
-                        <div class="brand-title">''' + brand_name + ''' TOP10</div>
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>序号</th>
-                                    <th>媒体名称</th>
-                                    <th>声量（篇）</th>
-                                    <th>触达（人次）</th>
-                                    <th>媒体类别</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                '''
-                for _, row in brand_df.iterrows():
-                    category_class = '汽车' if '汽车' in row['媒体类别'] else ('商业' if '商业' in row['媒体类别'] else ('生活' if '生活' in row['媒体类别'] else '综合'))
-                    result_html += '''
-                                <tr>
-                                    <td>''' + str(row['序号']) + '''</td>
-                                    <td>''' + str(row['媒体名称']) + '''</td>
-                                    <td>''' + str(row['声量（篇）']) + '''</td>
-                                    <td>''' + str(row['触达（人次）']) + '''</td>
-                                    <td><span class="category-tag category-''' + category_class + '''">''' + str(row['媒体类别']) + '''</span></td>
-                                </tr>
-                    '''
-                result_html += '''
-                            </tbody>
-                        </table>
-                    </div>
-                '''
-
-            yield sse_data({'type': 'done', 'content': result_html})
-
-        return Response(generate(), mimetype='text/event-stream')
+        # 返回完整页面
+        return '''
+            <div style="max-width: 900px; margin: 20px auto;">
+                <div style="text-align: center; margin-bottom: 20px;">
+                    <a href="/" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">← 上传新文件</a>
+                </div>
+                ''' + result_html + '''
+            </div>
+        '''
 
     except Exception as e:
-        import json
-        error_data = json.dumps({"type": "error", "message": "处理失败: " + str(e)})
-        return Response(
-            'data: ' + error_data + '\n\n',
-            mimetype='text/event-stream'
-        )
+        return '''
+            <div class="error">处理失败: ''' + str(e) + '''</div>
+            <script>setTimeout(() => { window.location.href = '/'; }, 5000)</script>
+        '''
 
 
 if __name__ == '__main__':
