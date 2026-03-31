@@ -1,19 +1,18 @@
 """
 月报竞品新闻渠道统计分析工具 - Web服务
-支持文件上传，自动处理并返回结果
+支持文件上传，自动处理并返回结果，带进度条显示
 """
 
 import os
-import sys
 import pandas as pd
 from datetime import datetime
-from flask import Flask, request, send_file, render_template_string, flash
+from flask import Flask, request, send_file, render_template_string, Response
 from io import BytesIO
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'competitor-news-analyzer-secret-key')
 
-# 媒体类别映射表（与命令行版本一致）
+# 媒体类别映射表
 MEDIA_CATEGORIES = {
     # ========== 汽车行业垂类媒体 ==========
     "汽车之家": "汽车行业垂类媒体",
@@ -131,24 +130,56 @@ def get_media_category(media_name):
     return "综合类媒体"
 
 
-def analyze_competitor_news(df):
-    """分析竞品新闻渠道数据"""
+def analyze_competitor_news_stream(df, progress_callback=None):
+    """分析竞品新闻渠道数据，支持进度回调"""
+
+    def send_progress(step, message, percent):
+        if progress_callback:
+            progress_callback(step, message, percent)
+
+    send_progress(1, "正在检查数据格式...", 10)
+
     # 检查必要的列
     required_columns = ["Media ID", "Date", "Source", "Potential Audience"]
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
         return None, f"缺少必要的列: {', '.join(missing_columns)}"
 
+    send_progress(2, "正在转换日期格式...", 20)
+
     # 转换日期列
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
 
     # 获取唯一品牌
     brands = df["Media ID"].dropna().unique().tolist()
+    total_brands = len(brands)
+
+    send_progress(3, f"发现 {total_brands} 个品牌，开始分析...", 30)
+
+    # 预计算每个(品牌, 媒体)的最新触达数
+    latest_audience_cache = {}
+    brand_idx = 0
+    for brand in brands:
+        brand_idx += 1
+        brand_df = df[df["Media ID"] == brand].copy()
+        send_progress(3, f"正在分析品牌 {brand_idx}/{total_brands}：{brand}...", 30 + int(brand_idx / total_brands * 40))
+
+        for source in brand_df["Source"].unique():
+            media_data = brand_df[brand_df["Source"] == source].copy()
+            media_data = media_data.dropna(subset=["Date"])
+            if media_data.empty:
+                latest_audience_cache[(brand, source)] = None
+            else:
+                latest_idx = media_data["Date"].idxmax()
+                latest_row = media_data.loc[latest_idx]
+                latest_audience_cache[(brand, source)] = latest_row["Potential Audience"]
+
+    send_progress(4, "正在生成TOP10排名...", 75)
 
     # 存储所有结果
     all_results = []
 
-    for brand in brands:
+    for i, brand in enumerate(brands):
         brand_df = df[df["Media ID"] == brand].copy()
 
         # 统计每个媒体的声量（篇数）
@@ -156,11 +187,7 @@ def analyze_competitor_news(df):
 
         # 获取每个媒体最新日期的触达数
         def get_latest_audience(media_name):
-            media_data = brand_df[brand_df["Source"] == media_name]
-            latest_row = media_data.loc[media_data["Date"].idxmax()] if not media_data.empty else None
-            if latest_row is not None:
-                return latest_row["Potential Audience"]
-            return None
+            return latest_audience_cache.get((brand, media_name), None)
 
         volume_df["触达（人次）"] = volume_df["Source"].apply(get_latest_audience)
 
@@ -175,6 +202,8 @@ def analyze_competitor_news(df):
 
         all_results.append(volume_df)
 
+    send_progress(5, "正在生成结果文件...", 90)
+
     return all_results, None
 
 
@@ -187,39 +216,23 @@ HTML_TEMPLATE = '''
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>月报竞品新闻渠道统计分析</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
             padding: 40px 20px;
         }
-        .container {
-            max-width: 900px;
-            margin: 0 auto;
-        }
+        .container { max-width: 900px; margin: 0 auto; }
         .card {
             background: white;
             border-radius: 16px;
             padding: 40px;
             box-shadow: 0 20px 60px rgba(0,0,0,0.3);
         }
-        h1 {
-            color: #333;
-            text-align: center;
-            margin-bottom: 10px;
-            font-size: 28px;
-        }
-        .subtitle {
-            text-align: center;
-            color: #666;
-            margin-bottom: 30px;
-            font-size: 14px;
-        }
+        h1 { color: #333; text-align: center; margin-bottom: 10px; font-size: 28px; }
+        .subtitle { text-align: center; color: #666; margin-bottom: 30px; font-size: 14px; }
+
         .upload-area {
             border: 2px dashed #ddd;
             border-radius: 12px;
@@ -229,29 +242,13 @@ HTML_TEMPLATE = '''
             transition: all 0.3s;
             cursor: pointer;
         }
-        .upload-area:hover {
-            border-color: #667eea;
-            background: #f8f9ff;
-        }
-        .upload-area.dragover {
-            border-color: #667eea;
-            background: #f0f3ff;
-        }
-        .upload-icon {
-            font-size: 48px;
-            margin-bottom: 15px;
-        }
-        .upload-text {
-            color: #666;
-            font-size: 16px;
-        }
-        .upload-text span {
-            color: #667eea;
-            font-weight: 600;
-        }
-        input[type="file"] {
-            display: none;
-        }
+        .upload-area:hover { border-color: #667eea; background: #f8f9ff; }
+        .upload-area.dragover { border-color: #667eea; background: #f0f3ff; }
+        .upload-icon { font-size: 48px; margin-bottom: 15px; }
+        .upload-text { color: #666; font-size: 16px; }
+        .upload-text span { color: #667eea; font-weight: 600; }
+        input[type="file"] { display: none; }
+
         .btn {
             display: inline-block;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -264,20 +261,47 @@ HTML_TEMPLATE = '''
             cursor: pointer;
             transition: transform 0.2s, box-shadow 0.2s;
         }
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4); }
+        .btn:disabled { background: #ccc; cursor: not-allowed; transform: none; box-shadow: none; }
+        .submit-area { text-align: center; margin-top: 20px; }
+
+        /* 进度条样式 */
+        .progress-container {
+            display: none;
+            margin: 20px 0;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 12px;
         }
-        .btn:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-            transform: none;
-            box-shadow: none;
-        }
-        .submit-area {
+        .progress-container.active { display: block; }
+        .progress-status {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 10px;
             text-align: center;
-            margin-top: 20px;
         }
+        .progress-bar-bg {
+            width: 100%;
+            height: 12px;
+            background: #e9ecef;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .progress-bar {
+            width: 0%;
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            border-radius: 6px;
+            transition: width 0.3s ease;
+        }
+        .progress-percent {
+            font-size: 24px;
+            font-weight: 600;
+            color: #667eea;
+            text-align: center;
+            margin-top: 10px;
+        }
+
         .note {
             background: #f8f9fa;
             border-radius: 8px;
@@ -286,14 +310,17 @@ HTML_TEMPLATE = '''
             font-size: 13px;
             color: #666;
         }
-        .note h3 {
-            color: #333;
-            margin-bottom: 8px;
-            font-size: 14px;
+        .note h3 { color: #333; margin-bottom: 8px; font-size: 14px; }
+        .note ul { margin-left: 20px; }
+
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
         }
-        .note ul {
-            margin-left: 20px;
-        }
+
         .result-info {
             background: #d4edda;
             border-radius: 8px;
@@ -301,9 +328,8 @@ HTML_TEMPLATE = '''
             margin-bottom: 20px;
             color: #155724;
         }
-        .brand-section {
-            margin-bottom: 30px;
-        }
+
+        .brand-section { margin-bottom: 30px; }
         .brand-title {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
@@ -311,11 +337,7 @@ HTML_TEMPLATE = '''
             border-radius: 8px 8px 0 0;
             font-weight: 600;
         }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 20px;
-        }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
         th {
             background: #f8f9fa;
             padding: 12px 8px;
@@ -329,12 +351,7 @@ HTML_TEMPLATE = '''
             text-align: center;
             border-bottom: 1px solid #dee2e6;
         }
-        tr:last-child td {
-            border-bottom: none;
-        }
-        tr:hover {
-            background: #f8f9fa;
-        }
+        tr:hover { background: #f8f9fa; }
         .category-tag {
             display: inline-block;
             padding: 4px 10px;
@@ -346,13 +363,7 @@ HTML_TEMPLATE = '''
         .category-商业 { background: #fff3e0; color: #e65100; }
         .category-综合 { background: #f3e5f5; color: #7b1fa2; }
         .category-生活 { background: #e8f5e9; color: #2e7d32; }
-        .error {
-            background: #f8d7da;
-            color: #721c24;
-            padding: 16px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-        }
+
         @media (max-width: 600px) {
             .card { padding: 20px; }
             table { font-size: 12px; }
@@ -366,15 +377,7 @@ HTML_TEMPLATE = '''
             <h1>月报竞品新闻渠道统计分析</h1>
             <p class="subtitle">上传Excel文件，自动统计品牌声量TOP10媒体</p>
 
-            {% with messages = get_flashed_messages() %}
-                {% if messages %}
-                    {% for message in messages %}
-                        <div class="error">{{ message }}</div>
-                    {% endfor %}
-                {% endif %}
-            {% endwith %}
-
-            <form method="POST" enctype="multipart/form-data" id="uploadForm">
+            <form id="uploadForm">
                 <div class="upload-area" id="uploadArea">
                     <div class="upload-icon">📁</div>
                     <p class="upload-text">
@@ -389,53 +392,17 @@ HTML_TEMPLATE = '''
                 </div>
             </form>
 
-            {% if result %}
-                <div class="result-info">
-                    ✅ 分析完成！共处理 <strong>{{ brands_count }}</strong> 个品牌，生成 <strong>{{ total_media }}</strong> 条记录
+            <!-- 进度显示区域 -->
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-status" id="progressStatus">准备中...</div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar" id="progressBar"></div>
                 </div>
+                <div class="progress-percent" id="progressPercent">0%</div>
+            </div>
 
-                {% for brand_df in result %}
-                    <div class="brand-section">
-                        <div class="brand-title">{{ brand_df[0]['品牌名称'] }} TOP10</div>
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>序号</th>
-                                    <th>媒体名称</th>
-                                    <th>声量（篇）</th>
-                                    <th>触达（人次）</th>
-                                    <th>媒体类别</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for _, row in brand_df.iterrows() %}
-                                <tr>
-                                    <td>{{ row['序号'] }}</td>
-                                    <td>{{ row['媒体名称'] }}</td>
-                                    <td>{{ row['声量（篇）'] }}</td>
-                                    <td>{{ row['触达（人次）'] }}</td>
-                                    <td>
-                                        {% if '汽车' in row['媒体类别'] %}
-                                            <span class="category-tag category-汽车">{{ row['媒体类别'] }}</span>
-                                        {% elif '商业' in row['媒体类别'] %}
-                                            <span class="category-tag category-商业">{{ row['媒体类别'] }}</span>
-                                        {% elif '生活' in row['媒体类别'] %}
-                                            <span class="category-tag category-生活">{{ row['媒体类别'] }}</span>
-                                        {% else %}
-                                            <span class="category-tag category-综合">{{ row['媒体类别'] }}</span>
-                                        {% endif %}
-                                    </td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                {% endfor %}
-
-                <div class="submit-area">
-                    <a href="{{ download_url }}" class="btn">📥 下载结果文件</a>
-                </div>
-            {% endif %}
+            <!-- 结果显示区域 -->
+            <div id="resultArea"></div>
 
             <div class="note">
                 <h3>📋 使用说明</h3>
@@ -455,6 +422,11 @@ HTML_TEMPLATE = '''
         const fileInput = document.getElementById('fileInput');
         const fileName = document.getElementById('fileName');
         const submitBtn = document.getElementById('submitBtn');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressStatus = document.getElementById('progressStatus');
+        const progressBar = document.getElementById('progressBar');
+        const progressPercent = document.getElementById('progressPercent');
+        const resultArea = document.getElementById('resultArea');
 
         uploadArea.addEventListener('click', () => fileInput.click());
 
@@ -482,9 +454,68 @@ HTML_TEMPLATE = '''
             }
         });
 
-        document.getElementById('uploadForm').addEventListener('submit', () => {
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            if (!fileInput.files.length) {
+                alert('请选择文件');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            // 显示进度条
             submitBtn.disabled = true;
             submitBtn.textContent = '处理中...';
+            progressContainer.classList.add('active');
+            resultArea.innerHTML = '';
+
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let resultHTML = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value);
+                    const lines = chunk.split('\\n');
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const data = JSON.parse(line.slice(6));
+
+                            if (data.type === 'progress') {
+                                progressStatus.textContent = data.message;
+                                progressBar.style.width = data.percent + '%';
+                                progressPercent.textContent = data.percent + '%';
+                            } else if (data.type === 'html') {
+                                resultHTML += data.content;
+                            } else if (data.type === 'error') {
+                                resultArea.innerHTML = '<div class="error">' + data.message + '</div>';
+                            } else if (data.type === 'done') {
+                                resultHTML = data.content;
+                            }
+                        }
+                    }
+                }
+
+                resultArea.innerHTML = resultHTML;
+
+            } catch (error) {
+                resultArea.innerHTML = '<div class="error">处理失败: ' + error.message + '</div>';
+            }
+
+            submitBtn.disabled = false;
+            submitBtn.textContent = '开始分析';
+            progressContainer.classList.remove('active');
         });
     </script>
 </body>
@@ -492,107 +523,169 @@ HTML_TEMPLATE = '''
 '''
 
 
-@app.route('/', methods=['GET', 'POST'])
+@app.route('/')
 def index():
-    result = None
-    error = None
-    brands_count = 0
-    total_media = 0
-    download_url = None
-
-    if request.method == 'POST':
-        if 'file' not in request.files:
-            flash('请选择文件')
-            return render_template_string(HTML_TEMPLATE)
-
-        file = request.files['file']
-        if file.filename == '':
-            flash('请选择文件')
-            return render_template_string(HTML_TEMPLATE)
-
-        if not file.filename.endswith('.xlsx'):
-            flash('只支持 .xlsx 格式文件')
-            return render_template_string(HTML_TEMPLATE)
-
-        try:
-            # 读取文件
-            df = pd.read_excel(file)
-
-            # 分析数据
-            result, error = analyze_competitor_news(df)
-
-            if error:
-                flash(error)
-                return render_template_string(HTML_TEMPLATE)
-
-            # 生成结果文件
-            output = BytesIO()
-            from openpyxl import Workbook
-            from openpyxl.styles import Alignment, Font, Border, Side
-
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "处理结果"
-
-            header_font = Font(bold=True)
-            thin_border = Border(
-                left=Side(style='thin'),
-                right=Side(style='thin'),
-                top=Side(style='thin'),
-                bottom=Side(style='thin')
-            )
-
-            row_num = 1
-            for i, brand_df in enumerate(result):
-                if i > 0:
-                    row_num += 1
-                headers = ["序号", "品牌名称", "媒体名称", "声量（篇）", "触达（人次）", "媒体类别"]
-                for col, header in enumerate(headers, 1):
-                    cell = ws.cell(row=row_num, column=col, value=header)
-                    cell.font = header_font
-                    cell.border = thin_border
-                    cell.alignment = Alignment(horizontal='center')
-                row_num += 1
-
-                for _, row_data in brand_df.iterrows():
-                    for col, value in enumerate(row_data, 1):
-                        cell = ws.cell(row=row_num, column=col, value=value)
-                        cell.border = thin_border
-                        cell.alignment = Alignment(horizontal='center')
-                    row_num += 1
-
-            column_widths = [8, 12, 25, 12, 14, 18]
-            for i, width in enumerate(column_widths, 1):
-                ws.column_dimensions[chr(64 + i)].width = width
-
-            wb.save(output)
-            output.seek(0)
-
-            # 保存到临时文件
-            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-            temp_filename = f'result_{timestamp}.xlsx'
-            temp_path = os.path.join('/tmp' if os.path.exists('/tmp') else '.', temp_filename)
-            with open(temp_path, 'wb') as f:
-                f.write(output.getvalue())
-            download_url = f'/download/{temp_filename}'
-
-            brands_count = len(result)
-            total_media = sum(len(r) for r in result)
-
-        except Exception as e:
-            flash(f'处理失败: {str(e)}')
-            return render_template_string(HTML_TEMPLATE)
-
-    return render_template_string(HTML_TEMPLATE, result=result, error=error,
-                                   brands_count=brands_count, total_media=total_media,
-                                   download_url=download_url)
+    return render_template_string(HTML_TEMPLATE)
 
 
-@app.route('/download/<filename>')
-def download(filename):
-    return send_file(filename, as_attachment=True)
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    if 'file' not in request.files:
+        return Response(
+            'data: {"type":"error","message":"请选择文件"}\\n\\n',
+            mimetype='text/event-stream'
+        )
+
+    file = request.files['file']
+    if file.filename == '':
+        return Response(
+            'data: {"type":"error","message":"请选择文件"}\\n\\n',
+            mimetype='text/event-stream'
+        )
+
+    if not file.filename.endswith('.xlsx'):
+        return Response(
+            'data: {"type":"error","message":"只支持 .xlsx 格式文件"}\\n\\n',
+            mimetype='text/event-stream'
+        )
+
+    def progress_callback(step, message, percent):
+        pass  # SSE推送在下面处理
+
+    try:
+        # 读取文件
+        df = pd.read_excel(file)
+
+        # 使用SSE流式处理
+        def generate():
+            # 进度回调
+            def send_progress(step, message, percent):
+                import json
+                data = json.dumps({
+                    'type': 'progress',
+                    'step': step,
+                    'message': message,
+                    'percent': percent
+                })
+                yield f'data: {data}\\n\\n'
+
+            send_progress(1, '正在检查数据格式...', 10)
+            yield f'data: {"type":"progress","step":1,"message":"正在检查数据格式...","percent":10}\\n\\n'
+
+            # 检查必要的列
+            required_columns = ["Media ID", "Date", "Source", "Potential Audience"]
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                yield f'data: {"type":"error","message":"缺少必要的列: {", ".join(missing_columns)}"}\\n\\n'
+                return
+
+            yield f'data: {"type":"progress","step":2,"message":"正在转换日期格式...","percent":20}\\n\\n'
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+            brands = df["Media ID"].dropna().unique().tolist()
+            total_brands = len(brands)
+
+            yield f'data: {"type":"progress","step":3,"message":"发现 {total_brands} 个品牌，开始分析...","percent":30}\\n\\n'
+
+            # 预计算最新触达数
+            latest_audience_cache = {}
+            for i, brand in enumerate(brands):
+                brand_df = df[df["Media ID"] == brand].copy()
+                send_progress(3, f'正在分析品牌 {i+1}/{total_brands}：{brand}...', 30 + int((i+1) / total_brands * 40))
+                yield f'data: {"type":"progress","step":3,"message":"正在分析品牌 {i+1}/{total_brands}：{brand}...","percent":{30 + int((i+1) / total_brands * 40)}}\\n\\n'
+
+                for source in brand_df["Source"].unique():
+                    media_data = brand_df[brand_df["Source"] == source].copy()
+                    media_data = media_data.dropna(subset=["Date"])
+                    if media_data.empty:
+                        latest_audience_cache[(brand, source)] = None
+                    else:
+                        latest_idx = media_data["Date"].idxmax()
+                        latest_row = media_data.loc[latest_idx]
+                        latest_audience_cache[(brand, source)] = latest_row["Potential Audience"]
+
+            yield f'data: {"type":"progress","step":4,"message":"正在生成TOP10排名...","percent":75}\\n\\n'
+
+            # 生成结果
+            all_results = []
+            for brand in brands:
+                brand_df = df[df["Media ID"] == brand].copy()
+                volume_df = brand_df.groupby("Source").size().reset_index(name="声量（篇）")
+
+                def get_latest_audience(media_name):
+                    return latest_audience_cache.get((brand, media_name), None)
+
+                volume_df["触达（人次）"] = volume_df["Source"].apply(get_latest_audience)
+                volume_df = volume_df.sort_values("声量（篇）", ascending=False).head(10)
+                volume_df["品牌名称"] = brand
+                volume_df["媒体类别"] = volume_df["Source"].apply(get_media_category)
+                volume_df["触达（人次）"] = volume_df["触达（人次）"].apply(format_audience)
+                volume_df.insert(0, "序号", range(1, len(volume_df) + 1))
+                volume_df = volume_df.rename(columns={"Source": "媒体名称"})
+                volume_df = volume_df[["序号", "品牌名称", "媒体名称", "声量（篇）", "触达（人次）", "媒体类别"]]
+                all_results.append(volume_df)
+
+            yield f'data: {"type":"progress","step":5,"message":"正在生成结果...","percent":90}\\n\\n'
+
+            # 生成HTML
+            brands_count = len(all_results)
+            total_media = sum(len(r) for r in all_results)
+
+            result_html = f'''
+                <div class="result-info">
+                    ✅ 分析完成！共处理 <strong>{brands_count}</strong> 个品牌，生成 <strong>{total_media}</strong> 条记录
+                </div>
+            '''
+
+            for brand_df in all_results:
+                brand_name = brand_df[0]['品牌名称']
+                result_html += f'''
+                    <div class="brand-section">
+                        <div class="brand-title">{brand_name} TOP10</div>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>序号</th>
+                                    <th>媒体名称</th>
+                                    <th>声量（篇）</th>
+                                    <th>触达（人次）</th>
+                                    <th>媒体类别</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                '''
+                for _, row in brand_df.iterrows():
+                    category_class = '汽车' if '汽车' in row['媒体类别'] else ('商业' if '商业' in row['媒体类别'] else ('生活' if '生活' in row['媒体类别'] else '综合'))
+                    result_html += f'''
+                                <tr>
+                                    <td>{row['序号']}</td>
+                                    <td>{row['媒体名称']}</td>
+                                    <td>{row['声量（篇）']}</td>
+                                    <td>{row['触达（人次）']}</td>
+                                    <td><span class="category-tag category-{category_class}">{row['媒体类别']}</span></td>
+                                </tr>
+                    '''
+                result_html += '''
+                            </tbody>
+                        </table>
+                    </div>
+                '''
+
+            import json
+            done_data = json.dumps({"type": "done", "content": result_html})
+            yield 'data: ' + done_data + '\n\n'
+
+        return Response(generate(), mimetype='text/event-stream')
+
+    except Exception as e:
+        import json
+        error_data = json.dumps({"type": "error", "message": "处理失败: " + str(e)})
+        return Response(
+            'data: ' + error_data + '\n\n',
+            mimetype='text/event-stream'
+        )
 
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=os.environ.get('FLASK_DEBUG', 'false').lower() == 'true')
+    app.run(host='0.0.0.0', port=port, debug=False)
