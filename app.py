@@ -454,7 +454,7 @@ HTML_TEMPLATE = '''
             }
         });
 
-        document.getElementById('uploadForm').addEventListener('submit', (e) => {
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
             e.preventDefault();
 
             if (!fileInput.files.length) {
@@ -474,49 +474,25 @@ HTML_TEMPLATE = '''
             progressStatus.textContent = '正在分析数据...';
             resultArea.innerHTML = '';
 
-            // 使用 iframe 方式提交，避免页面跳转
-            const iframe = document.createElement('iframe');
-            iframe.style.display = 'none';
-            iframe.name = 'uploadFrame';
-            document.body.appendChild(iframe);
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
 
-            // 监听 iframe 加载完成
-            iframe.onload = () => {
-                try {
-                    const doc = iframe.contentDocument || iframe.contentWindow.document;
-                    const body = doc.body.innerHTML;
-                    if (body.includes('error') || body.includes('result-info')) {
-                        resultArea.innerHTML = body;
-                        progressBar.style.width = '100%';
-                        progressPercent.textContent = '100%';
-                        progressStatus.textContent = '处理完成！';
-                    }
-                } catch (err) {
-                    resultArea.innerHTML = '<div class="error">处理失败，请稍后重试</div>';
-                }
+                const html = await response.text();
+
+                // 用返回的HTML替换整个页面
+                document.open();
+                document.write(html);
+                document.close();
+
+            } catch (error) {
+                resultArea.innerHTML = '<div class="error">处理失败: ' + error.message + '</div>';
                 submitBtn.disabled = false;
                 submitBtn.textContent = '开始分析';
-                setTimeout(() => {
-                    progressContainer.classList.remove('active');
-                    document.body.removeChild(iframe);
-                }, 2000);
-            };
-
-            // 监听超时
-            setTimeout(() => {
-                if (submitBtn.disabled) {
-                    submitBtn.disabled = false;
-                    submitBtn.textContent = '开始分析';
-                    progressContainer.classList.remove('active');
-                    resultArea.innerHTML = '<div class="error">处理超时，请稍后重试</div>';
-                    if (document.body.contains(iframe)) {
-                        document.body.removeChild(iframe);
-                    }
-                }
-            }, 120000); // 2分钟超时
-
-            document.getElementById('uploadForm').target = 'uploadFrame';
-            document.getElementById('uploadForm').submit();
+                progressContainer.classList.remove('active');
+            }
         });
     </script>
 </body>
